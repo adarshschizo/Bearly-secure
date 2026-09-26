@@ -1,0 +1,32 @@
+dockerignore
+# Environment files
+.env
+.env.local
+
+# Git metadata
+.git
+.git/config
+
+# Temporary files and logs
+tmp/
+tmp/cache
+*.log
+
+# Local databases
+data/bearly-secure.sqlite
+data/bearly-secure.sqlite-wal
+
+# Bulk-import documents
+data/bulk-tax-documents/import.zip
+
+# Runtime uploads
+data/uploads/untrusted.pdf
+
+# Local/build artifacts
+bin/
+dist/
+build/
+*.test
+coverage.out
+node_modules/
+__pycache__/

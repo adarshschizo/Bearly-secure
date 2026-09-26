@@ -11,6 +11,21 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/storefront"
 )
 
+type productResponse struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ImagePath   string `json:"image_path"`
+	PriceCents  int64  `json:"price_cents"`
+}
+
+type orderResponse struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	TotalCents int64  `json:"total_cents"`
+	CreatedAt  string `json:"created_at"`
+}
+
 type integrationOrderResponse struct {
 	ID         int64  `json:"id"`
 	Status     string `json:"status"`
@@ -34,98 +49,307 @@ type Handler struct {
 	maxProductResults int64
 }
 
-func NewHandler(accountStore *accounts.Store, orderStore *orders.Store, productStore *storefront.Store, apiStore *Store, logger *logging.Logger, maxProductResults int) *Handler {
+func NewHandler(
+	accountStore *accounts.Store,
+	orderStore *orders.Store,
+	productStore *storefront.Store,
+	apiStore *Store,
+	logger *logging.Logger,
+	maxProductResults int,
+) *Handler {
 	return &Handler{
-		accountStore: accountStore, orderStore: orderStore, productStore: productStore, apiStore: apiStore,
-		logger: logger, maxProductResults: int64(maxProductResults),
+		accountStore:      accountStore,
+		orderStore:        orderStore,
+		productStore:      productStore,
+		apiStore:          apiStore,
+		logger:            logger,
+		maxProductResults: int64(maxProductResults),
 	}
 }
 
-func (handler *Handler) AccountOrders(responseWriter http.ResponseWriter, request *http.Request) {
+func (handler *Handler) AccountOrders(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+) {
 	current, ok := handler.requireAuthentication(responseWriter, request)
 	if !ok {
 		return
 	}
-	orders, err := handler.orderStore.ListForUser(request.Context(), current.User.ID)
+
+	orders, err := handler.orderStore.ListForUser(
+		request.Context(),
+		current.User.ID,
+	)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{"orders": orders})
+
+	responses := make([]orderResponse, 0, len(orders))
+
+	for _, order := range orders {
+		responses = append(responses, orderResponse{
+			ID:         order.ID,
+			Status:     order.Status,
+			TotalCents: order.TotalCents,
+			CreatedAt:  order.CreatedAt,
+		})
+	}
+
+	httpx.RespondWithJSON(
+		responseWriter,
+		http.StatusOK,
+		map[string]any{"orders": responses},
+	)
 }
 
-func (handler *Handler) Order(responseWriter http.ResponseWriter, request *http.Request) {
-	_, ok := handler.requireAuthentication(responseWriter, request)
+func (handler *Handler) Order(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+) {
+	// Keep the authenticated user's session so we can verify
+	// that the requested order belongs to them.
+	current, ok := handler.requireAuthentication(responseWriter, request)
 	if !ok {
 		return
 	}
+
 	orderID, valid := httpx.ParseSafeInteger(request.PathValue("id"))
 	if !valid {
-		httpx.RespondWithJSON(responseWriter, http.StatusNotFound, map[string]string{"error": "Order not found"})
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusNotFound,
+			map[string]string{"error": "Order not found"},
+		)
 		return
 	}
-	order, found, err := handler.orderStore.FindByID(request.Context(), orderID)
+
+	order, found, err := handler.orderStore.FindByID(
+		request.Context(),
+		orderID,
+	)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	if !found {
-		httpx.RespondWithJSON(responseWriter, http.StatusNotFound, map[string]string{"error": "Order not found"})
+
+	// Return the same 404 response if the order doesn't exist
+	// OR if it belongs to another user.
+	if !found || order.UserID != current.User.ID {
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusNotFound,
+			map[string]string{"error": "Order not found"},
+		)
 		return
 	}
-	items, err := handler.orderStore.ListItems(request.Context(), order.ID)
+
+	items, err := handler.orderStore.ListItems(
+		request.Context(),
+		order.ID,
+	)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	itemResponses := make([]orderItemResponse, 0, len(items))
+
 	for _, item := range items {
-		itemResponses = append(itemResponses, orderItemResponse{ProductID: item.ProductID, ProductName: item.ProductName, Quantity: item.Quantity, PriceCents: item.PriceCents})
+		itemResponses = append(itemResponses, orderItemResponse{
+			ProductID:   item.ProductID,
+			ProductName: item.ProductName,
+			Quantity:    item.Quantity,
+			PriceCents:  item.PriceCents,
+		})
 	}
-	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{"order": order, "items": itemResponses})
+
+	orderResponse := orderResponse{
+		ID:         order.ID,
+		Status:     order.Status,
+		TotalCents: order.TotalCents,
+		CreatedAt:  order.CreatedAt,
+	}
+
+	httpx.RespondWithJSON(
+		responseWriter,
+		http.StatusOK,
+		map[string]any{
+			"order": orderResponse,
+			"items": itemResponses,
+		},
+	)
 }
 
-func (handler *Handler) Products(responseWriter http.ResponseWriter, request *http.Request) {
-	products, err := handler.productStore.ListAllProducts(request.Context())
+func (handler *Handler) Products(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+) {
+	// Public API must only expose active products.
+	products, err := handler.productStore.ListProducts(
+		request.Context(),
+		handler.maxProductResults,
+	)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{"products": products})
+
+	responses := make([]productResponse, 0, len(products))
+
+	for _, product := range products {
+		responses = append(responses, productResponse{
+			ID:          product.ID,
+			Name:        product.Name,
+			Description: product.Description,
+			ImagePath:   product.ImagePath,
+			PriceCents:  product.PriceCents,
+		})
+	}
+
+	httpx.RespondWithJSON(
+		responseWriter,
+		http.StatusOK,
+		map[string]any{"products": responses},
+	)
 }
 
-func (handler *Handler) WarehouseOrders(responseWriter http.ResponseWriter, request *http.Request) {
+func (handler *Handler) WarehouseOrders(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+) {
+	apiKey := request.Header.Get("X-API-Key")
+
+	if apiKey == "" {
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusUnauthorized,
+			map[string]string{
+				"error": "API key required",
+			},
+		)
+		return
+	}
+
+	key, found, err := handler.apiStore.FindKey(
+		request.Context(),
+		apiKey,
+	)
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+
+	if !found {
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusUnauthorized,
+			map[string]string{
+				"error": "Invalid API key",
+			},
+		)
+		return
+	}
+
+	if key.Scope != "orders:read" {
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusForbidden,
+			map[string]string{
+				"error": "API key lacks required scope",
+			},
+		)
+		return
+	}
+
+	quota, err := handler.apiStore.ConsumeQuota(
+		request.Context(),
+		key.ID,
+	)
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+
+	SetQuotaHeaders(responseWriter, quota)
+
+	if !quota.Allowed {
+		RespondWithQuotaExhausted(responseWriter, quota)
+		return
+	}
+
 	orders, err := handler.orderStore.ListAll(request.Context())
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	responses := make([]integrationOrderResponse, 0, len(orders))
+
 	for _, order := range orders {
 		responses = append(responses, integrationOrderResponse{
-			ID: order.ID, Status: order.Status, TotalCents: order.TotalCents, CreatedAt: order.CreatedAt,
+			ID:         order.ID,
+			Status:     order.Status,
+			TotalCents: order.TotalCents,
+			CreatedAt:  order.CreatedAt,
 		})
 	}
-	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{
-		"integration": "Warehouse Fulfillment Integration",
-		"orders":      responses,
-	})
+
+	httpx.RespondWithJSON(
+		responseWriter,
+		http.StatusOK,
+		map[string]any{
+			"integration": "Warehouse Fulfillment Integration",
+			"orders":      responses,
+			"quota":       ToQuotaResponse(quota),
+		},
+	)
 }
 
-func (handler *Handler) requireAuthentication(responseWriter http.ResponseWriter, request *http.Request) (accounts.CurrentSession, bool) {
-	current, found, err := sessions.Current(request, handler.accountStore)
+func (handler *Handler) requireAuthentication(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+) (accounts.CurrentSession, bool) {
+	current, found, err := sessions.Current(
+		request,
+		handler.accountStore,
+	)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return accounts.CurrentSession{}, false
 	}
+
 	if !found {
-		httpx.RespondWithJSON(responseWriter, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+		httpx.RespondWithJSON(
+			responseWriter,
+			http.StatusUnauthorized,
+			map[string]string{
+				"error": "Authentication required",
+			},
+		)
 		return accounts.CurrentSession{}, false
 	}
+
 	return current, true
 }
 
-func (handler *Handler) internalError(responseWriter http.ResponseWriter, request *http.Request, err error) {
-	_ = handler.logger.Event("unhandled_error", map[string]any{"method": request.Method, "path": request.URL.Path, "message": err.Error()})
-	httpx.RespondWithError(responseWriter, http.StatusInternalServerError, err.Error())
+func (handler *Handler) internalError(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+	err error,
+) {
+	_ = handler.logger.Event(
+		"unhandled_error",
+		map[string]any{
+			"method":  request.Method,
+			"path":    request.URL.Path,
+			"message": err.Error(),
+		},
+	)
+
+	httpx.RespondWithError(
+		responseWriter,
+		http.StatusInternalServerError,
+		err.Error(),
+	)
 }

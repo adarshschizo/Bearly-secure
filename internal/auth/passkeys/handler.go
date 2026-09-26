@@ -14,6 +14,7 @@ import (
 
 	"github.com/bootdotdev/learn-web-security/internal/accounts"
 	"github.com/bootdotdev/learn-web-security/internal/auth/mfa"
+	"github.com/bootdotdev/learn-web-security/internal/auth/returnto"
 	"github.com/bootdotdev/learn-web-security/internal/auth/sessions"
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
@@ -81,7 +82,8 @@ func NewHandler(appOrigin string, accountStore *accounts.Store, mfaStore *mfa.St
 }
 
 func (handler *Handler) LoginPage(responseWriter http.ResponseWriter, request *http.Request) {
-	returnTo := unsafeReturnTo(request.URL.Query().Get("returnTo"))
+	returnTo := returnto.Safe(request.URL.Query().Get("returnTo"))
+
 	if err := handler.renderLogin(responseWriter, http.StatusOK, "", returnTo); err != nil {
 		handler.internalError(responseWriter, request, err)
 	}
@@ -109,17 +111,20 @@ func (handler *Handler) CompleteLogin(responseWriter http.ResponseWriter, reques
 		}
 		return
 	}
+
 	challenge, found, err := handler.passkeys.ConsumeChallenge(request.Context(), challengeID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if !found {
 		if renderErr := handler.renderLogin(responseWriter, http.StatusBadRequest, "Challenge expired. Try again.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
 		}
 		return
 	}
+
 	credentialID, found := responseCredentialID(assertion)
 	if !found {
 		if renderErr := handler.renderLogin(responseWriter, http.StatusBadRequest, "Invalid passkey response.", returnTo); renderErr != nil {
@@ -127,11 +132,13 @@ func (handler *Handler) CompleteLogin(responseWriter http.ResponseWriter, reques
 		}
 		return
 	}
+
 	credentialAccountID, found, err := handler.passkeys.CredentialAccountID(request.Context(), credentialID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if !found {
 		if renderErr := handler.renderLogin(responseWriter, http.StatusUnauthorized, "Passkey not recognised.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
@@ -141,63 +148,89 @@ func (handler *Handler) CompleteLogin(responseWriter http.ResponseWriter, reques
 
 	parsedResponse, err := protocol.ParseCredentialRequestResponse(request)
 	if err != nil {
-		_ = handler.logger.Event("passkey_login_failed", map[string]any{"credentialId": credentialID, "error": err.Error()})
+		_ = handler.logger.Event("passkey_login_failed", map[string]any{
+			"credentialId": credentialID,
+			"error":        err.Error(),
+		})
 		if renderErr := handler.renderLogin(responseWriter, http.StatusUnauthorized, "Passkey verification failed.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
 		}
 		return
 	}
+
 	if encodeBase64URL(parsedResponse.RawID) != credentialID {
 		if renderErr := handler.renderLogin(responseWriter, http.StatusUnauthorized, "Passkey verification failed.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
 		}
 		return
 	}
+
 	account, found, err := handler.accounts.FindUserByID(request.Context(), credentialAccountID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if !found {
 		if renderErr := handler.renderLogin(responseWriter, http.StatusInternalServerError, "User not found.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
 		}
 		return
 	}
+
 	user, err := handler.passkeys.User(request.Context(), account)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	sessionData := challenge.SessionData
 	sessionData.UserID = user.WebAuthnID()
-	var credential *webauthn.Credential
-	err = errors.New("passkey assertion validation is not implemented")
+
+	credential, err := handler.webauthn.ValidateLogin(
+		user,
+		sessionData,
+		parsedResponse,
+	)
 	if err != nil {
-		_ = handler.logger.Event("passkey_login_failed", map[string]any{"credentialId": credentialID, "error": err.Error()})
+		_ = handler.logger.Event("passkey_login_failed", map[string]any{
+			"credentialId": credentialID,
+			"error":        err.Error(),
+		})
 		if renderErr := handler.renderLogin(responseWriter, http.StatusUnauthorized, "Passkey verification failed.", returnTo); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
 		}
 		return
 	}
+
 	if err := handler.passkeys.UpdateCounter(request.Context(), *credential); err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	session, err := handler.accounts.CreateSession(request.Context(), account.ID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if err := handler.mfa.DeleteChallenge(request.Context(), totpLoginChallengeToken(request)); err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	_ = handler.logger.Event("passkey_login_success", map[string]any{"userId": account.ID, "email": account.Email, "credentialId": credentialID})
+
+	_ = handler.logger.Event("passkey_login_success", map[string]any{
+		"userId":       account.ID,
+		"email":        account.Email,
+		"credentialId": credentialID,
+	})
+
 	sessions.SetCookie(responseWriter, session)
+
 	if totpLoginChallengeToken(request) != "" {
 		clearTOTPLoginChallengeCookie(responseWriter)
 	}
+
 	http.Redirect(responseWriter, request, returnTo, http.StatusFound)
 }
 
@@ -361,7 +394,7 @@ func (handler *Handler) passkeyResponse(responseWriter http.ResponseWriter, requ
 			if err != nil {
 				return uuid.Nil(), "/", nil, err
 			}
-			returnTo = unsafeReturnTo(returnToValue)
+			returnTo = returnto.Safe(returnToValue)
 		}
 		delete(responseFields, "returnTo")
 	}
@@ -372,13 +405,6 @@ func (handler *Handler) passkeyResponse(responseWriter http.ResponseWriter, requ
 	request.Body = io.NopCloser(bytes.NewReader(encodedResponse))
 	request.ContentLength = int64(len(encodedResponse))
 	return challengeID, returnTo, responseFields, nil
-}
-
-func unsafeReturnTo(value string) string {
-	if value == "" {
-		return "/"
-	}
-	return value
 }
 
 func responseCredentialID(responseFields map[string]json.RawMessage) (string, bool) {

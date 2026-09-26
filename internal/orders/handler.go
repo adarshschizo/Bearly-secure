@@ -62,36 +62,47 @@ func (handler *Handler) Detail(responseWriter http.ResponseWriter, request *http
 	if !ok {
 		return
 	}
+
 	orderID, valid := httpx.ParseSafeInteger(request.PathValue("id"))
 	if !valid {
 		handler.orderNotFound(responseWriter)
 		return
 	}
+
 	order, found, err := handler.orderStore.FindByID(request.Context(), orderID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if !found {
 		handler.orderNotFound(responseWriter)
 		return
 	}
+
+	// Enforce order ownership
+	if order.UserID != current.User.ID {
+		handler.orderNotFound(responseWriter)
+		return
+	}
+
 	orderItems, err := handler.orderStore.ListItems(request.Context(), order.ID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	view := detailPageView{
 		Title:       "Order #" + strconv.FormatInt(order.ID, 10),
 		DisplayName: current.User.DisplayName,
 		Order:       order,
 		Items:       orderItems,
 	}
+
 	if err := handler.renderer.Render(responseWriter, http.StatusOK, "order", view); err != nil {
 		handler.internalError(responseWriter, request, err)
 	}
 }
-
 func (handler *Handler) requireAuth(responseWriter http.ResponseWriter, request *http.Request) (accounts.CurrentSession, bool) {
 	current, found, err := sessions.Require(responseWriter, request, handler.accountStore)
 	if err != nil {

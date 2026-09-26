@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/bootdotdev/learn-web-security/internal/database/dbgen"
@@ -20,7 +21,7 @@ const defaultSessionTTL = 30 * 24 * time.Hour
 var ErrEmailExists = errors.New("an account already exists for that email")
 
 func NormalizeEmail(email string) string {
-	return email
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 type User struct {
@@ -125,14 +126,20 @@ func (store *Store) CreateCustomer(ctx context.Context, email, displayName, pass
 }
 
 func (store *Store) UpdatePasswordHash(ctx context.Context, userID int64, passwordHash string) error {
-	if err := store.queries.UpdateUserPasswordHash(ctx, dbgen.UpdateUserPasswordHashParams{PasswordHash: passwordHash, ID: userID}); err != nil {
+	if err := store.queries.UpdateUserPasswordHash(ctx, dbgen.UpdateUserPasswordHashParams{
+		PasswordHash: passwordHash,
+		ID:           userID,
+	}); err != nil {
 		return fmt.Errorf("update password hash: %w", err)
 	}
 	return nil
 }
 
 func (store *Store) UpdateEmail(ctx context.Context, userID int64, email string) error {
-	_, err := store.queries.UpdateUserEmail(ctx, dbgen.UpdateUserEmailParams{Email: email, ID: userID})
+	_, err := store.queries.UpdateUserEmail(ctx, dbgen.UpdateUserEmailParams{
+		Email: email,
+		ID:    userID,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrEmailExists
 	}
@@ -145,10 +152,12 @@ func (store *Store) UpdateEmail(ctx context.Context, userID int64, email string)
 func (store *Store) CreateSession(ctx context.Context, userID int64) (Session, error) {
 	now := store.now().UTC()
 	expiresAt := now.Add(defaultSessionTTL)
+
 	tokenBytes := make([]byte, 32)
 	if _, err := io.ReadFull(store.random, tokenBytes); err != nil {
 		return Session{}, fmt.Errorf("generate session token: %w", err)
 	}
+
 	csrfBytes := make([]byte, 32)
 	if _, err := io.ReadFull(store.random, csrfBytes); err != nil {
 		return Session{}, fmt.Errorf("generate CSRF token: %w", err)
@@ -157,6 +166,7 @@ func (store *Store) CreateSession(ctx context.Context, userID int64) (Session, e
 	token := hex.EncodeToString(tokenBytes)
 	csrfToken := base64.RawURLEncoding.EncodeToString(csrfBytes)
 	nowISO := formatTimestamp(now)
+
 	if err := store.queries.CreateSession(ctx, dbgen.CreateSessionParams{
 		TokenHash:           HashSessionToken(token),
 		UserID:              userID,
@@ -167,6 +177,7 @@ func (store *Store) CreateSession(ctx context.Context, userID int64) (Session, e
 	}); err != nil {
 		return Session{}, fmt.Errorf("create session: %w", err)
 	}
+
 	return Session{
 		UserID:              userID,
 		CSRFToken:           csrfToken,
@@ -181,6 +192,7 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 	if token == "" {
 		return CurrentSession{}, false, nil
 	}
+
 	row, err := store.queries.GetSessionByTokenHash(ctx, HashSessionToken(token))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -188,14 +200,17 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 		}
 		return CurrentSession{}, false, fmt.Errorf("find session: %w", err)
 	}
+
 	expiresAt, err := time.Parse(time.RFC3339, row.ExpiresAt)
-	if err != nil || !store.now().Before(expiresAt) {
+	if err != nil || !store.now().Before(expiresAt) || row.RevokedAt != nil {
 		return CurrentSession{}, false, nil
 	}
+
 	user, found, err := store.FindUserByID(ctx, row.UserID)
 	if err != nil || !found {
 		return CurrentSession{}, false, err
 	}
+
 	return CurrentSession{
 		Session: Session{
 			UserID:              row.UserID,
@@ -212,13 +227,24 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 
 func (store *Store) RevokeSession(ctx context.Context, token string) error {
 	revokedAt := formatTimestamp(store.now().UTC())
+
 	if err := store.queries.RevokeSession(ctx, dbgen.RevokeSessionParams{
 		RevokedAt: &revokedAt,
 		TokenHash: HashSessionToken(token),
 	}); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
+
 	return nil
+}
+
+func (store *Store) RevokeAllActiveSessions(ctx context.Context) (int, error) {
+	result, err := store.queries.RevokeAllActiveSessions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("revoke all active sessions: %w", err)
+	}
+
+	return int(result), nil
 }
 
 func (store *Store) CartQuantities(ctx context.Context, userID int64) (map[int64]int64, error) {
@@ -226,10 +252,12 @@ func (store *Store) CartQuantities(ctx context.Context, userID int64) (map[int64
 	if err != nil {
 		return nil, fmt.Errorf("list cart quantities: %w", err)
 	}
+
 	quantities := make(map[int64]int64, len(rows))
 	for _, row := range rows {
 		quantities[row.ProductID] = row.Quantity
 	}
+
 	return quantities, nil
 }
 

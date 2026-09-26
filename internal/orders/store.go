@@ -45,22 +45,32 @@ func NewStore(database *sql.DB) *Store {
 	return &Store{database: database, queries: dbgen.New(database)}
 }
 
-func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems []cart.Item, discountCents int64, shippingDetails ShippingDetails, adminNotes string, keyring *storage.Keyring) (Order, error) {
+func (store *Store) CreateFromCart(
+	ctx context.Context,
+	userID int64,
+	cartItems []cart.Item,
+	shippingDetails ShippingDetails,
+	adminNotes string,
+	keyring *storage.Keyring,
+) (Order, error) {
 	encryptedShippingDetails, err := EncryptShippingDetails(shippingDetails, keyring)
 	if err != nil {
 		return Order{}, err
 	}
+
 	var totalCents int64
 	for _, cartItem := range cartItems {
 		totalCents += cartItem.LineTotalCents
 	}
-	totalCents -= discountCents
+
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Order{}, fmt.Errorf("begin order transaction: %w", err)
 	}
 	defer transaction.Rollback()
+
 	queries := store.queries.WithTx(transaction)
+
 	orderID, err := queries.CreateOrder(ctx, dbgen.CreateOrderParams{
 		UserID:                   userID,
 		TotalCents:               totalCents,
@@ -70,6 +80,7 @@ func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems 
 	if err != nil {
 		return Order{}, fmt.Errorf("create order: %w", err)
 	}
+
 	for _, cartItem := range cartItems {
 		result, err := queries.DecrementProductInventory(ctx, dbgen.DecrementProductInventoryParams{
 			Quantity:  cartItem.Quantity,
@@ -78,13 +89,16 @@ func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems 
 		if err != nil {
 			return Order{}, fmt.Errorf("decrement product inventory: %w", err)
 		}
+
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
 			return Order{}, fmt.Errorf("read inventory update: %w", err)
 		}
+
 		if rowsAffected != 1 {
 			return Order{}, ErrInsufficientInventory
 		}
+
 		if err := queries.CreateOrderItem(ctx, dbgen.CreateOrderItemParams{
 			OrderID:    orderID,
 			ProductID:  cartItem.ProductID,
@@ -94,19 +108,24 @@ func (store *Store) CreateFromCart(ctx context.Context, userID int64, cartItems 
 			return Order{}, fmt.Errorf("create order item: %w", err)
 		}
 	}
+
 	if err := queries.DeleteOrderCartItems(ctx, userID); err != nil {
 		return Order{}, fmt.Errorf("clear ordered cart: %w", err)
 	}
+
 	order, found, err := findByID(ctx, queries, orderID)
 	if err != nil {
 		return Order{}, err
 	}
+
 	if !found {
 		return Order{}, errors.New("created order was not found")
 	}
+
 	if err := transaction.Commit(); err != nil {
 		return Order{}, fmt.Errorf("commit order transaction: %w", err)
 	}
+
 	return order, nil
 }
 
@@ -115,10 +134,12 @@ func (store *Store) ListForUser(ctx context.Context, userID int64) ([]Order, err
 	if err != nil {
 		return nil, fmt.Errorf("list orders for user: %w", err)
 	}
+
 	orders := make([]Order, 0, len(rows))
 	for _, row := range rows {
 		orders = append(orders, mapListOrder(row))
 	}
+
 	return orders, nil
 }
 
@@ -127,6 +148,7 @@ func (store *Store) ListAll(ctx context.Context) ([]Order, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list all orders: %w", err)
 	}
+
 	orders := make([]Order, 0, len(rows))
 	for _, row := range rows {
 		orders = append(orders, Order{
@@ -141,6 +163,7 @@ func (store *Store) ListAll(ctx context.Context) ([]Order, error) {
 			CreatedAt:                row.CreatedAt,
 		})
 	}
+
 	return orders, nil
 }
 
@@ -153,6 +176,7 @@ func (store *Store) ApprovePawPalOrder(ctx context.Context, orderID int64) (bool
 	if err != nil {
 		return false, fmt.Errorf("approve PawPal order: %w", err)
 	}
+
 	return rowsAffected == 1, nil
 }
 
@@ -161,6 +185,7 @@ func (store *Store) ListItems(ctx context.Context, orderID int64) ([]Item, error
 	if err != nil {
 		return nil, fmt.Errorf("list order items: %w", err)
 	}
+
 	items := make([]Item, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, Item{
@@ -172,6 +197,7 @@ func (store *Store) ListItems(ctx context.Context, orderID int64) ([]Item, error
 			PriceCents:  row.PriceCents,
 		})
 	}
+
 	return items, nil
 }
 
@@ -181,8 +207,10 @@ func findByID(ctx context.Context, queries *dbgen.Queries, orderID int64) (Order
 		if errors.Is(err, sql.ErrNoRows) {
 			return Order{}, false, nil
 		}
+
 		return Order{}, false, fmt.Errorf("find order: %w", err)
 	}
+
 	return mapOrder(row), true, nil
 }
 

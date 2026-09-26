@@ -20,11 +20,16 @@ func Open(filePath string) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
+
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open application log: %w", err)
 	}
-	return &Logger{file: file, now: time.Now}, nil
+
+	return &Logger{
+		file: file,
+		now:  time.Now,
+	}, nil
 }
 
 func (logger *Logger) Close() error {
@@ -32,16 +37,45 @@ func (logger *Logger) Close() error {
 }
 
 func (logger *Logger) Event(eventName string, fields map[string]any) error {
+	sensitiveKeys := map[string]bool{
+		"sessionId":          true,
+		"resetToken":         true,
+		"resetLink":          true,
+		"secret":             true,
+		"adminNotes":         true,
+		"storagePath":        true,
+		"email":              true,
+		"shippingName":       true,
+		"shippingAddress":    true,
+		"shippingCity":       true,
+		"shippingRegion":     true,
+		"shippingPostalCode": true,
+		"originalName":       true,
+	}
+
+	sanitizedFields := make(map[string]any, len(fields))
+
+	for key, value := range fields {
+		if sensitiveKeys[key] {
+			sanitizedFields[key] = "[REDACTED]"
+		} else {
+			sanitizedFields[key] = value
+		}
+	}
+
 	record := map[string]any{
 		"timestamp": logger.now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		"event":     eventName,
 	}
-	maps.Copy(record, fields)
+
+	maps.Copy(record, sanitizedFields)
 
 	logger.mutex.Lock()
 	defer logger.mutex.Unlock()
+
 	if err := json.NewEncoder(logger.file).Encode(record); err != nil {
 		return fmt.Errorf("write application log: %w", err)
 	}
+
 	return nil
 }

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 
 type Config struct {
 	PawPalAPIKey               string
+	DownloadSigningKey         [32]byte
 	AppOrigin                  string
 	Port                       int
 	DatabasePath               string
@@ -34,6 +37,7 @@ type Config struct {
 	MaxRequestBodyBytes        int64
 	MaxUploadBytes             int64
 	MaxPublicProductResults    int
+	TrustedProxyHops           int
 	ActiveEncryptionKeyVersion string
 	EncryptionKeys             map[string][32]byte
 }
@@ -43,32 +47,95 @@ type AttackerLabConfig struct {
 }
 
 func Load(workingDirectory string) (Config, error) {
-	return Parse(processEnvironment(), workingDirectory)
+	environment, err := loadEnvironment(workingDirectory)
+	if err != nil {
+		return Config{}, err
+	}
+
+	return Parse(environment, workingDirectory)
 }
 
 func LoadAttackerLab(workingDirectory string) (AttackerLabConfig, error) {
-	return ParseAttackerLab(processEnvironment())
+	environment, err := loadEnvironment(workingDirectory)
+	if err != nil {
+		return AttackerLabConfig{}, err
+	}
+
+	return ParseAttackerLab(environment)
+}
+
+func loadEnvironment(workingDirectory string) (map[string]string, error) {
+	environment := make(map[string]string)
+
+	envPath := filepath.Join(workingDirectory, ".env")
+
+	if _, err := os.Stat(envPath); err == nil {
+		dotenv, err := godotenv.Read(envPath)
+		if err != nil {
+			return nil, fmt.Errorf("load .env: %w", err)
+		}
+
+		for key, value := range dotenv {
+			environment[key] = value
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("check .env: %w", err)
+	}
+
+	// Process environment overrides values loaded from .env.
+	for key, value := range processEnvironment() {
+		environment[key] = value
+	}
+
+	return environment, nil
 }
 
 func Parse(environment map[string]string, workingDirectory string) (Config, error) {
-	port, err := parseNonNegativeInteger(valueOrDefault(environment, "PORT", strconv.Itoa(defaultPort)), "PORT")
+	pawPalAPIKey, err := requiredEnv(environment, "PAWPAL_API_KEY")
 	if err != nil {
 		return Config{}, err
 	}
+
+	downloadSigningKey, err := requiredHexKey(environment, "DOWNLOAD_SIGNING_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+
+	port, err := parseNonNegativeInteger(
+		valueOrDefault(environment, "PORT", strconv.Itoa(defaultPort)),
+		"PORT",
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	if port > 65_535 {
 		return Config{}, errors.New("PORT must be no greater than 65535")
 	}
-	appOrigin, err := parseOrigin(valueOrDefault(environment, "APP_ORIGIN", defaultAppOrigin))
+
+	trustedProxyHops, err := parseNonNegativeInteger(
+		valueOrDefault(environment, "TRUST_PROXY_HOPS", "0"),
+		"TRUST_PROXY_HOPS",
+	)
 	if err != nil {
 		return Config{}, err
 	}
 
-	acornFulfillmentDelay, err := parseDelay(valueOrDefault(environment, "ACORN_FULFILLMENT_DELAY_MS", "0"))
+	appOrigin, err := parseOrigin(
+		valueOrDefault(environment, "APP_ORIGIN", defaultAppOrigin),
+	)
 	if err != nil {
 		return Config{}, err
 	}
 
-	activeEncryptionKeyVersion, encryptionKeys, err := parseOptionalEncryptionKeys(environment)
+	acornFulfillmentDelay, err := parseDelay(
+		valueOrDefault(environment, "ACORN_FULFILLMENT_DELAY_MS", "0"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	activeEncryptionKeyVersion, encryptionKeys, err := parseEncryptionKeys(environment)
 	if err != nil {
 		return Config{}, err
 	}
@@ -79,7 +146,8 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 	}
 
 	return Config{
-		PawPalAPIKey:               "bs_test_pawpal_starter_key",
+		PawPalAPIKey:               pawPalAPIKey,
+		DownloadSigningKey:         downloadSigningKey,
 		AppOrigin:                  appOrigin,
 		Port:                       port,
 		DatabasePath:               databasePath,
@@ -87,30 +155,44 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 		MaxRequestBodyBytes:        MaxRequestBodyBytes,
 		MaxUploadBytes:             MaxUploadBytes,
 		MaxPublicProductResults:    MaxPublicProductResults,
+		TrustedProxyHops:           trustedProxyHops,
 		ActiveEncryptionKeyVersion: activeEncryptionKeyVersion,
 		EncryptionKeys:             encryptionKeys,
 	}, nil
 }
 
 func ParseAttackerLab(environment map[string]string) (AttackerLabConfig, error) {
-	port, err := parseNonNegativeInteger(valueOrDefault(environment, "ATTACKER_LAB_PORT", strconv.Itoa(defaultAttackerLabPort)), "ATTACKER_LAB_PORT")
+	port, err := parseNonNegativeInteger(
+		valueOrDefault(
+			environment,
+			"ATTACKER_LAB_PORT",
+			strconv.Itoa(defaultAttackerLabPort),
+		),
+		"ATTACKER_LAB_PORT",
+	)
 	if err != nil {
 		return AttackerLabConfig{}, err
 	}
+
 	if port > 65_535 {
 		return AttackerLabConfig{}, errors.New("ATTACKER_LAB_PORT must be no greater than 65535")
 	}
+
 	return AttackerLabConfig{Port: port}, nil
 }
 
 func processEnvironment() map[string]string {
 	environment := make(map[string]string)
-	for _, entry := range os.Environ() {
-		name, value, found := strings.Cut(entry, "=")
-		if found {
-			environment[name] = value
+
+	for _, value := range os.Environ() {
+		parts := strings.SplitN(value, "=", 2)
+		if len(parts) != 2 {
+			continue
 		}
+
+		environment[parts[0]] = parts[1]
 	}
+
 	return environment
 }
 
@@ -118,7 +200,34 @@ func valueOrDefault(environment map[string]string, name, fallback string) string
 	if value := environment[name]; value != "" {
 		return value
 	}
+
 	return fallback
+}
+
+func requiredEnv(environment map[string]string, name string) (string, error) {
+	value := environment[name]
+	if value == "" {
+		return "", fmt.Errorf("missing required environment variable: %s", name)
+	}
+
+	return value, nil
+}
+
+func requiredHexKey(environment map[string]string, name string) ([32]byte, error) {
+	value, err := requiredEnv(environment, name)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != 32 {
+		return [32]byte{}, fmt.Errorf(
+			"%s must be exactly 64 hexadecimal characters",
+			name,
+		)
+	}
+
+	return [32]byte(decoded), nil
 }
 
 func parseNonNegativeInteger(value, name string) (int, error) {
@@ -126,6 +235,7 @@ func parseNonNegativeInteger(value, name string) (int, error) {
 	if err != nil || parsed < 0 {
 		return 0, fmt.Errorf("%s must be a non-negative integer", name)
 	}
+
 	return parsed, nil
 }
 
@@ -134,89 +244,135 @@ func parseOrigin(value string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", errors.New("APP_ORIGIN must be an absolute URL")
 	}
+
 	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 func parseDelay(value string) (time.Duration, error) {
 	milliseconds, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(milliseconds) || math.IsInf(milliseconds, 0) || milliseconds < 0 {
+	if err != nil ||
+		math.IsNaN(milliseconds) ||
+		math.IsInf(milliseconds, 0) ||
+		milliseconds < 0 {
 		return 0, errors.New("ACORN_FULFILLMENT_DELAY_MS must be a non-negative number")
 	}
+
 	if milliseconds > float64(math.MaxInt64)/float64(time.Millisecond) {
 		return 0, errors.New("ACORN_FULFILLMENT_DELAY_MS is too large")
 	}
+
 	return time.Duration(milliseconds * float64(time.Millisecond)), nil
 }
 
 func parseOptionalEncryptionKeys(environment map[string]string) (string, map[string][32]byte, error) {
 	_, hasActiveVersion := environment[activeEncryptionVersionEnv]
+
 	hasEncryptionKey := false
+
 	for name := range environment {
 		if strings.HasPrefix(name, encryptionKeyEnvPrefix) {
 			hasEncryptionKey = true
 			break
 		}
 	}
+
 	if !hasActiveVersion && !hasEncryptionKey {
 		return "", nil, nil
 	}
+
 	return parseEncryptionKeys(environment)
 }
 
 func parseEncryptionKeys(environment map[string]string) (string, map[string][32]byte, error) {
 	configuredVersion := environment[activeEncryptionVersionEnv]
+
 	if configuredVersion == "" {
-		return "", nil, fmt.Errorf("missing required environment variable: %s", activeEncryptionVersionEnv)
+		return "", nil, fmt.Errorf(
+			"missing required environment variable: %s",
+			activeEncryptionVersionEnv,
+		)
 	}
+
 	activeVersion, err := normalizeEncryptionVersion(configuredVersion)
 	if err != nil {
 		return "", nil, err
 	}
 
 	keys := make(map[string][32]byte)
+
 	for name, value := range environment {
 		if !strings.HasPrefix(name, encryptionKeyEnvPrefix) {
 			continue
 		}
-		version, err := normalizeEncryptionVersion(strings.TrimPrefix(name, encryptionKeyEnvPrefix))
+
+		version, err := normalizeEncryptionVersion(
+			strings.TrimPrefix(name, encryptionKeyEnvPrefix),
+		)
 		if err != nil {
 			return "", nil, err
 		}
+
 		if _, exists := keys[version]; exists {
-			return "", nil, fmt.Errorf("duplicate encryption key version: %s", version)
+			return "", nil, fmt.Errorf(
+				"duplicate encryption key version: %s",
+				version,
+			)
 		}
+
 		key, err := parseEncryptionKey(value, name)
 		if err != nil {
 			return "", nil, err
 		}
+
 		keys[version] = key
 	}
+
 	if _, exists := keys[activeVersion]; !exists {
-		return "", nil, fmt.Errorf("no encryption key configured for active version: %s", activeVersion)
+		return "", nil, fmt.Errorf(
+			"no encryption key configured for active version: %s",
+			activeVersion,
+		)
 	}
+
 	return activeVersion, keys, nil
 }
 
 func parseEncryptionKey(value, name string) ([32]byte, error) {
 	decoded, err := hex.DecodeString(value)
+
 	if err != nil || len(decoded) != 32 {
-		return [32]byte{}, fmt.Errorf("%s must be exactly 64 hexadecimal characters", name)
+		return [32]byte{}, fmt.Errorf(
+			"%s must be exactly 64 hexadecimal characters",
+			name,
+		)
 	}
+
 	return [32]byte(decoded), nil
 }
 
 func normalizeEncryptionVersion(version string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(version))
+
 	if normalized == "" {
 		return "", fmt.Errorf("invalid encryption key version: %s", version)
 	}
+
 	for index, character := range normalized {
-		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+		if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' {
 			continue
 		}
-		if character != '_' || index == 0 || index == len(normalized)-1 || normalized[index-1] == '_' {
-			return "", fmt.Errorf("invalid encryption key version: %s", version)
+
+		if character != '_' ||
+			index == 0 ||
+			index == len(normalized)-1 ||
+			normalized[index-1] == '_' {
+			return "", fmt.Errorf(
+				"invalid encryption key version: %s",
+				version,
+			)
 		}
 	}
+
 	return normalized, nil
 }

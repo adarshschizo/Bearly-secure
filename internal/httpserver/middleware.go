@@ -3,23 +3,25 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
 )
-
 type middleware func(http.Handler) http.Handler
 
 func applyMiddleware(handler http.Handler, middlewareChain ...middleware) http.Handler {
@@ -29,34 +31,167 @@ func applyMiddleware(handler http.Handler, middlewareChain ...middleware) http.H
 	return handler
 }
 
-func permissiveCORS(next http.Handler) http.Handler {
+type requestIDContextKey struct{}
+
+func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
-		if origin := request.Header.Get("Origin"); origin != "" {
-			responseWriter.Header().Set("Access-Control-Allow-Origin", origin)
-			responseWriter.Header().Set("Access-Control-Allow-Credentials", "true")
-			responseWriter.Header().Set("Vary", "Origin")
-		}
-		if request.Method == http.MethodOptions {
-			responseWriter.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			responseWriter.Header().Set("Access-Control-Allow-Headers", request.Header.Get("Access-Control-Request-Headers"))
-			responseWriter.WriteHeader(http.StatusNoContent)
+		id := uuid.NewV4()
+
+		responseWriter.Header().Set("X-Request-ID", id.String())
+
+		ctx := context.WithValue(
+			request.Context(),
+			requestIDContextKey{},
+			id,
+		)
+
+		next.ServeHTTP(responseWriter, request.WithContext(ctx))
+	})
+}
+
+func requestIDFromContext(ctx context.Context) uuid.UUID {
+	id, ok := ctx.Value(requestIDContextKey{}).(uuid.UUID)
+	if !ok {
+		return uuid.Nil()
+	}
+
+	return id
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		// Generate a fresh nonce for every response.
+		nonceBytes := make([]byte, 16)
+		if _, err := rand.Read(nonceBytes); err != nil {
+			http.Error(
+				responseWriter,
+				http.StatusText(http.StatusInternalServerError),
+				http.StatusInternalServerError,
+			)
 			return
 		}
+
+		nonce := base64.StdEncoding.EncodeToString(nonceBytes)
+
+		request = request.WithContext(
+			httpx.WithCSPNonce(request.Context(), nonce),
+		)
+
+		// Preserve the existing CSP directives.
+		policy := fmt.Sprintf(
+			"default-src 'self'; script-src 'self' 'nonce-%s'; style-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+			nonce,
+		)
+
+		responseWriter.Header().Set("Content-Security-Policy", policy)
+		responseWriter.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		responseWriter.Header().Set("X-Content-Type-Options", "nosniff")
+		responseWriter.Header().Set("X-Frame-Options", "SAMEORIGIN")
+
+		responseWriter.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		responseWriter.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		responseWriter.Header().Set("Origin-Agent-Cluster", "?1")
+		responseWriter.Header().Set("X-DNS-Prefetch-Control", "off")
+		responseWriter.Header().Set("X-Download-Options", "noopen")
+		responseWriter.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
+		responseWriter.Header().Set("X-XSS-Protection", "0")
+
+		// The sandboxed shipping widget is intentionally allowed
+		// to load these two resources cross-origin.
+		if request.URL.Path == "/shipping-widget.css" ||
+			request.URL.Path == "/shipping-widget.js" {
+			responseWriter.Header().Set(
+				"Cross-Origin-Resource-Policy",
+				"cross-origin",
+			)
+		}
+
 		next.ServeHTTP(responseWriter, request)
 	})
 }
 
-func cspNonce(next http.Handler) http.Handler {
+func publicProductsCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
-		nonceBytes := make([]byte, 16)
-		if _, err := rand.Read(nonceBytes); err != nil {
-			http.Error(responseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		nonce := base64.StdEncoding.EncodeToString(nonceBytes)
-		request = request.WithContext(httpx.WithCSPNonce(request.Context(), nonce))
+		responseWriter.Header().Set("Access-Control-Allow-Origin", "*")
 		next.ServeHTTP(responseWriter, request)
 	})
+}
+
+func productsCORSPreflight(responseWriter http.ResponseWriter, request *http.Request) {
+	responseWriter.Header().Set("Access-Control-Allow-Origin", "*")
+	responseWriter.Header().Set("Access-Control-Allow-Methods", "GET")
+	responseWriter.WriteHeader(http.StatusNoContent)
+}
+
+func validateRequestSource(appOrigin string, renderer *templates.Renderer) middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPost {
+				next.ServeHTTP(responseWriter, request)
+				return
+			}
+
+			origin := request.Header.Get("Origin")
+
+			if origin != "" {
+				if origin != appOrigin {
+					_ = httpx.RespondWithErrorPage(
+						responseWriter,
+						renderer,
+						http.StatusForbidden,
+						"Forbidden",
+						"Request source is not allowed.",
+					)
+					return
+				}
+
+				next.ServeHTTP(responseWriter, request)
+				return
+			}
+
+			referer := request.Header.Get("Referer")
+			if referer == "" {
+				_ = httpx.RespondWithErrorPage(
+					responseWriter,
+					renderer,
+					http.StatusForbidden,
+					"Forbidden",
+					"Request source is not allowed.",
+				)
+				return
+			}
+
+			parsedReferer, err := url.Parse(referer)
+			if err != nil ||
+				parsedReferer.Scheme == "" ||
+				parsedReferer.Host == "" ||
+				parsedReferer.User != nil ||
+				parsedReferer.Path == "" {
+				_ = httpx.RespondWithErrorPage(
+					responseWriter,
+					renderer,
+					http.StatusForbidden,
+					"Forbidden",
+					"Request source is not allowed.",
+				)
+				return
+			}
+
+			refererOrigin := parsedReferer.Scheme + "://" + parsedReferer.Host
+			if refererOrigin != appOrigin {
+				_ = httpx.RespondWithErrorPage(
+					responseWriter,
+					renderer,
+					http.StatusForbidden,
+					"Forbidden",
+					"Request source is not allowed.",
+				)
+				return
+			}
+
+			next.ServeHTTP(responseWriter, request)
+		})
+	}
 }
 
 func recoverPanics(logger *logging.Logger, renderer *templates.Renderer) middleware {
@@ -69,26 +204,95 @@ func recoverPanics(logger *logging.Logger, renderer *templates.Renderer) middlew
 						"path":    request.URL.Path,
 						"message": fmt.Sprint(recovered),
 					})
-					if err := httpx.RespondWithErrorPage(responseWriter, renderer, http.StatusInternalServerError, "Unhandled Error", fmt.Sprint(recovered)); err != nil {
-						http.Error(responseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+
+					if err := httpx.RespondWithErrorPage(
+						responseWriter,
+						renderer,
+						http.StatusInternalServerError,
+						"Unhandled Error",
+						fmt.Sprint(recovered),
+					); err != nil {
+						http.Error(
+							responseWriter,
+							http.StatusText(http.StatusInternalServerError),
+							http.StatusInternalServerError,
+						)
 					}
 				}
 			}()
+
 			next.ServeHTTP(responseWriter, request)
 		})
 	}
 }
 
-func LoadShedder(_ int, _ int) func(http.Handler) http.Handler {
+func LoadShedder(maxInFlight int, retryAfterSeconds int) func(http.Handler) http.Handler {
+	if maxInFlight <= 0 {
+		panic("load-shedder maximum in-flight requests must be positive")
+	}
+
+	if retryAfterSeconds <= 0 {
+		panic("load-shedder retry-after seconds must be positive")
+	}
+
+	inFlight := make(chan struct{}, maxInFlight)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			responseWriter.Header().Set(
+				"X-In-Flight-Limit",
+				strconv.Itoa(maxInFlight),
+			)
+
+			select {
+			case inFlight <- struct{}{}:
+				defer func() {
+					<-inFlight
+				}()
+
+				next.ServeHTTP(responseWriter, request)
+
+			default:
+				responseWriter.Header().Set(
+					"Retry-After",
+					strconv.Itoa(retryAfterSeconds),
+				)
+
+				httpx.RespondWithJSON(
+					responseWriter,
+					http.StatusServiceUnavailable,
+					map[string]string{
+						"error": "Service is at capacity",
+					},
+				)
+			}
+		})
 	}
 }
 
-func SearchThrottle(_ *templates.Renderer) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return next
-	}
+func SearchThrottle(renderer *templates.Renderer) func(http.Handler) http.Handler {
+	return fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Second,
+		maximum: 5,
+		key: func(_ *http.Request) string {
+			return "search"
+		},
+		onLimit: func(responseWriter http.ResponseWriter, _ *http.Request, _ rateLimitState) {
+			if err := httpx.RespondWithErrorPage(
+				responseWriter,
+				renderer,
+				http.StatusTooManyRequests,
+				"Search Is Busy",
+				"Try again shortly.",
+			); err != nil {
+				http.Error(
+					responseWriter,
+					http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError,
+				)
+			}
+		},
+	})
 }
 
 type rateLimitCounter struct {
@@ -120,12 +324,15 @@ type fixedWindowLimiter struct {
 
 func newFixedWindowLimiter(options rateLimitOptions) *fixedWindowLimiter {
 	validateRateLimitOptions(options)
+
 	if options.now == nil {
 		options.now = time.Now
 	}
+
 	if options.key == nil {
 		options.key = clientIPKey
 	}
+
 	return &fixedWindowLimiter{
 		options:     options,
 		counters:    make(map[string]rateLimitCounter),
@@ -137,6 +344,7 @@ func validateRateLimitOptions(options rateLimitOptions) {
 	if options.window <= 0 {
 		panic("rate-limit window must be positive")
 	}
+
 	if options.maximum <= 0 {
 		panic("rate-limit maximum must be positive")
 	}
@@ -148,13 +356,21 @@ func (limiter *fixedWindowLimiter) consume(request *http.Request) (rateLimitStat
 
 	limiter.countersMutex.Lock()
 	defer limiter.countersMutex.Unlock()
+
 	limiter.sweepExpiredCounters(now)
 
 	counter, exists := limiter.counters[key]
 	if !exists || !now.Before(counter.resetAt) {
-		counter = rateLimitCounter{resetAt: now.Add(limiter.options.window)}
+		counter = rateLimitCounter{
+			resetAt: now.Add(limiter.options.window),
+		}
 	}
-	retryAfterSeconds := max(1, int(math.Ceil(counter.resetAt.Sub(now).Seconds())))
+
+	retryAfterSeconds := max(
+		1,
+		int(math.Ceil(counter.resetAt.Sub(now).Seconds())),
+	)
+
 	if counter.count >= limiter.options.maximum {
 		return rateLimitState{
 			limit:             limiter.options.maximum,
@@ -166,6 +382,7 @@ func (limiter *fixedWindowLimiter) consume(request *http.Request) (rateLimitStat
 
 	counter.count++
 	limiter.counters[key] = counter
+
 	return rateLimitState{
 		limit:             limiter.options.maximum,
 		remaining:         limiter.options.maximum - counter.count,
@@ -178,35 +395,76 @@ func (limiter *fixedWindowLimiter) sweepExpiredCounters(now time.Time) {
 	if now.Before(limiter.nextSweepAt) {
 		return
 	}
+
 	for counterKey, counter := range limiter.counters {
 		if !now.Before(counter.resetAt) {
 			delete(limiter.counters, counterKey)
 		}
 	}
+
 	limiter.nextSweepAt = now.Add(limiter.options.window)
 }
 
-func (limiter *fixedWindowLimiter) reject(responseWriter http.ResponseWriter, request *http.Request, state rateLimitState) {
+func (limiter *fixedWindowLimiter) reject(
+	responseWriter http.ResponseWriter,
+	request *http.Request,
+	state rateLimitState,
+) {
 	setRateLimitHeaders(responseWriter, state)
-	responseWriter.Header().Set("Retry-After", strconv.Itoa(state.retryAfterSeconds))
+	responseWriter.Header().Set(
+		"Retry-After",
+		strconv.Itoa(state.retryAfterSeconds),
+	)
+
 	if limiter.options.onLimit != nil {
 		limiter.options.onLimit(responseWriter, request, state)
 		return
 	}
-	httpx.RespondWithJSON(responseWriter, http.StatusTooManyRequests, map[string]string{"error": "Too many requests"})
+
+	httpx.RespondWithJSON(
+		responseWriter,
+		http.StatusTooManyRequests,
+		map[string]string{"error": "Too many requests"},
+	)
 }
 
 func fixedWindowRateLimiter(options rateLimitOptions) middleware {
-	validateRateLimitOptions(options)
+	limiter := newFixedWindowLimiter(options)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			state, limited := limiter.consume(request)
+
+			if limited {
+				limiter.reject(responseWriter, request, state)
+				return
+			}
+
+			setRateLimitHeaders(responseWriter, state)
+			next.ServeHTTP(responseWriter, request)
+		})
 	}
 }
 
-func setRateLimitHeaders(responseWriter http.ResponseWriter, state rateLimitState) {
-	responseWriter.Header().Set("RateLimit-Limit", strconv.Itoa(state.limit))
-	responseWriter.Header().Set("RateLimit-Remaining", strconv.Itoa(state.remaining))
-	responseWriter.Header().Set("RateLimit-Reset", strconv.FormatInt(state.resetAt.Unix()+boolToInt64(state.resetAt.Nanosecond() > 0), 10))
+func setRateLimitHeaders(
+	responseWriter http.ResponseWriter,
+	state rateLimitState,
+) {
+	responseWriter.Header().Set(
+		"RateLimit-Limit",
+		strconv.Itoa(state.limit),
+	)
+	responseWriter.Header().Set(
+		"RateLimit-Remaining",
+		strconv.Itoa(state.remaining),
+	)
+	responseWriter.Header().Set(
+		"RateLimit-Reset",
+		strconv.FormatInt(
+			state.resetAt.Unix()+boolToInt64(state.resetAt.Nanosecond() > 0),
+			10,
+		),
+	)
 }
 
 func clientIPKey(request *http.Request) string {
@@ -214,23 +472,33 @@ func clientIPKey(request *http.Request) string {
 	if err == nil && host != "" {
 		return host
 	}
+
 	if request.RemoteAddr != "" {
 		return request.RemoteAddr
 	}
+
 	return "unknown"
 }
 
 func clientIPKeyWithTrustedProxies(trustedProxyHops int) func(*http.Request) string {
 	return func(request *http.Request) string {
 		if trustedProxyHops > 0 {
-			forwardedAddresses := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
+			forwardedAddresses := strings.Split(
+				request.Header.Get("X-Forwarded-For"),
+				",",
+			)
+
 			selectedIndex := len(forwardedAddresses) - trustedProxyHops
+
 			if selectedIndex >= 0 && selectedIndex < len(forwardedAddresses) {
-				if selectedAddress := strings.TrimSpace(forwardedAddresses[selectedIndex]); selectedAddress != "" {
+				if selectedAddress := strings.TrimSpace(
+					forwardedAddresses[selectedIndex],
+				); selectedAddress != "" {
 					return selectedAddress
 				}
 			}
 		}
+
 		return clientIPKey(request)
 	}
 }
@@ -239,5 +507,6 @@ func boolToInt64(value bool) int64 {
 	if value {
 		return 1
 	}
+
 	return 0
 }
