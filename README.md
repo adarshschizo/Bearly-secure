@@ -95,3 +95,25 @@ After completing the Quick Start setup, start the main application with:
 
 ```bash
 go run ./cmd/server
+
+
+---
+
+## Contributing
+
+Bearly Secure is primarily a learning project for the Learn Web Security in Go course.
+
+When contributing changes:
+
+1. Keep changes focused and clearly documented.
+2. Follow standard Go formatting.
+3. Run the test suite before committing changes.
+4. Run static analysis before committing changes.
+5. Do not commit `.env` files or secrets.
+6. Do not commit API keys, passwords, private keys, or other sensitive information.
+7. Keep changes consistent with the educational purpose of the project.
+
+Before committing, check your changes:
+
+```bash
+git status
