@@ -6,6 +6,17 @@ Bearly Secure is the intentionally vulnerable starter app for Learn Web Security
 >
 > This repository is an intentionally vulnerable course project. Course assignments may change its behavior, so treat this README as the current setup and structure reference rather than a security guide.
 
+## Motivation
+
+Bearly Secure was developed as a hands-on project to understand how security should be integrated into a real-world web application rather than treated as an afterthought.
+
+The main motivation behind this project was to learn how to identify, prevent, and respond to common web application security risks while working with Go. Throughout the project, security controls were implemented across authentication, authorization, sessions, password management, input handling, file uploads, encryption, rate limiting, security headers, logging, monitoring, and incident response.
+
+The project also focuses on understanding the reasoning behind security decisions. Instead of simply implementing individual protections, Bearly Secure demonstrates how multiple layers of security work together to protect users, application data, and infrastructure.
+
+This project was built as a practical learning experience in secure backend development, with the goal of developing stronger skills in Go, web security, defensive programming, and secure system design.
+
+
 ## Requirements
 
 - Go 1.27.0 or newer
