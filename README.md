@@ -82,3 +82,16 @@ You can verify your Go installation with:
 
 ```bash
 go version
+
+---
+
+## Usage
+
+Bearly Secure is designed as a hands-on environment for learning web application security with Go.
+
+### Start the Application
+
+After completing the Quick Start setup, start the main application with:
+
+```bash
+go run ./cmd/server
