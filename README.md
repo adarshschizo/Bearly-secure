@@ -1,107 +1,84 @@
 # Bearly Secure
 
-Bearly Secure is the intentionally vulnerable starter app for Learn Web Security in Go. It's a tiny plushie shop built with Go, `net/http`, and SQLite.
+Bearly Secure is an intentionally vulnerable starter web application built for the **Learn Web Security in Go** course.
+
+It is a small plushie shop application built using **Go**, Go's standard `net/http` package, and **SQLite**. The project provides a realistic environment for learning how web applications can be attacked, secured, monitored, and improved through practical security engineering.
 
 > [!IMPORTANT]
 >
-> This repository is an intentionally vulnerable course project. Course assignments may change its behavior, so treat this README as the current setup and structure reference rather than a security guide.
+> This repository is an intentionally vulnerable course project. Course assignments may change its behavior, so this README should be treated as the current setup and structure reference rather than a general-purpose security guide.
+
+---
 
 ## Motivation
 
-Bearly Secure was developed as a hands-on project to understand how security should be integrated into a real-world web application rather than treated as an afterthought.
+The motivation behind Bearly Secure is to gain practical experience with **secure web application development** using Go.
 
-The main motivation behind this project was to learn how to identify, prevent, and respond to common web application security risks while working with Go. Throughout the project, security controls were implemented across authentication, authorization, sessions, password management, input handling, file uploads, encryption, rate limiting, security headers, logging, monitoring, and incident response.
+Security is an important part of modern software development and should not be treated as an afterthought. A web application can contain vulnerabilities at many different layers, including authentication, authorization, session management, input validation, file handling, APIs, browser security, cryptography, infrastructure, and operational monitoring.
 
-The project also focuses on understanding the reasoning behind security decisions. Instead of simply implementing individual protections, Bearly Secure demonstrates how multiple layers of security work together to protect users, application data, and infrastructure.
+Bearly Secure provides a hands-on environment where these concepts can be explored in the context of a realistic application.
 
-This project was built as a practical learning experience in secure backend development, with the goal of developing stronger skills in Go, web security, defensive programming, and secure system design.
+Throughout the project, security concepts and controls include:
 
+- Authentication and authorization
+- Session management
+- Password security
+- Password reset protection
+- Multi-factor authentication
+- Access control
+- Input validation
+- File upload security
+- Secure file handling
+- Encryption
+- Key management
+- Security headers
+- Content Security Policy
+- Cross-Origin Resource Sharing
+- Rate limiting
+- Load shedding
+- Bot detection
+- Logging and security monitoring
+- Request tracing and request IDs
+- Security alerts
+- Incident response
+- Session revocation
+- DDoS mitigation concepts
+- TLS and certificate trust
+- Secure integrations
+- OAuth concepts
+- Security incident reporting
+- Postmortem analysis
 
-## Requirements
+The project also focuses on understanding **why** security controls are necessary rather than simply implementing them.
+
+By working through the application, the goal is to understand how multiple security layers work together to protect:
+
+- Users
+- Authentication credentials
+- Sessions
+- Customer information
+- Application data
+- APIs
+- Uploaded files
+- Internal services
+- Infrastructure
+
+Bearly Secure is therefore both a software development project and a practical security-learning environment.
+
+---
+
+## Quick Start
+
+### Requirements
+
+Before running Bearly Secure, make sure the following software is installed:
 
 - Go 1.27.0 or newer
+- Git
+- SQLite-compatible environment
+- A terminal
 
-## Run the Starter
+You can verify your Go installation with:
 
-Create a local environment file from the example. Keep `.env` private; it is ignored by Git.
-
-```sh
-cp .env.example .env
-```
-
-Set `PAWPAL_API_KEY`, `DOWNLOAD_SIGNING_KEY`, and `DATA_ENCRYPTION_KEY_V1` in `.env` before starting the application. The signing and encryption values must be 64 hexadecimal characters. Use disposable local values only.
-
-Seed the local database:
-
-```sh
-go run ./cmd/seed
-```
-
-Start the app at <http://localhost:3030>:
-
-```sh
-go run ./cmd/server
-```
-
-## Attacker Lab
-
-In another terminal, start the browser-based attacker lab at <http://localhost:4040>:
-
-```sh
-go run ./cmd/attackerlab
-```
-
-It runs as a separate process and stays on a separate origin so you can explore cross-origin browser security behavior.
-
-## Project Checks
-
-Run the test suite:
-
-```sh
-go test ./...
-```
-
-Check static analysis:
-
-```sh
-go vet ./...
-```
-
-You can restore the deterministic starter data at any time with `go run ./cmd/seed`.
-
-## Baseline Features
-
-- Public storefront with product listing, search, detail pages, and reviews
-- Account creation, login, logout, password reset, and session cookies
-- Account profiles, order history, review management, and tax-document uploads
-- Authenticated shopping cart and checkout with simulated PawPal and Acorn integrations
-- Support and admin areas for order, tax-document, and product workflows
-- JSON product and order APIs
-- Browser attacker lab and embedded shipping widget
-- Deterministic local order-assistant simulation
-- SQLite seed data, local file storage, and JSON-lines application logs
-- Multi-stage container build that compiles the Bearly Secure and attacker-lab binaries
-
-## Security Warning
-
-Bearly Secure is deliberately unsafe. It contains exploitable authentication, authorization, injection, browser-security, data-exposure, infrastructure, and operational weaknesses for course exercises.
-
-Do not deploy it or use its security patterns in a real application. Its credentials, integrations, payments, and third-party services are local simulations that use fake data only.
-
-## Baseline Structure
-
-- `cmd/server`: starts Bearly Secure
-- `cmd/attackerlab`: starts the attacker lab
-- `cmd/seed`: resets the deterministic SQLite data
-- `internal/`: contains application behavior
-- `internal/database/`: contains migrations, sqlc queries, and seed data
-- `internal/httpserver/`: composes the HTTP server and middleware
-- `internal/auth/`: contains authentication, session, TOTP, passkey, and access-control helpers
-- `internal/integrations/`: contains simulated external-service integrations
-- `internal/uploads/`: contains upload metadata, middleware, and archive extraction
-- `web/`: contains server-rendered templates and static assets
-- `attacker-lab/`: contains the browser attacker lab assets
-- `data/fixtures/`: contains the public educational sample used by lesson checks and the container build
-- `data/uploads/`: contains runtime uploads and is excluded from Git
-- `data/bulk-tax-documents/`: receives documents extracted from support ZIP imports
-- `Dockerfile`: defines the multi-stage container image for Bearly Secure and the attacker lab
+```bash
+go version
